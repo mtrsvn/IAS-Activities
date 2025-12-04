@@ -1,42 +1,63 @@
 <?php
+session_start();
+$dbHost = 'localhost';
+$dbName = 'password';
+$dbUser = 'root';
+$dbPass = '';
+
+try {
+	$pdo = new PDO(
+		"mysql:host={$dbHost};dbname={$dbName};charset=utf8mb4",
+		$dbUser,
+		$dbPass,
+		[
+			PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+			PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+		]
+	);
+} catch (Throwable $e) {
+	$dbConnectError = 'Unable to connect to the database: ' . $e->getMessage();
+}
+
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
 $username = '';
 $password = '';
 $formErrors = [];
-$passwordChecks = [
-		'length' => false,
-		'uppercase' => false,
-		'special' => false,
-		'digit' => false,
-];
+$successMessage = '';
 
 if ($method === 'POST') {
 		$username = isset($_POST['username']) ? trim((string)$_POST['username']) : '';
 		$password = isset($_POST['password']) ? (string)$_POST['password'] : '';
-                
 
-		$passwordChecks['length'] = strlen($password) > 8;
-		$passwordChecks['uppercase'] = (bool)preg_match('/[A-Z]/', $password);
-		$passwordChecks['special'] = (bool)preg_match('/[@_!]/', $password);
-		$passwordChecks['digit'] = (bool)preg_match('/\d/', $password);
-
-		$allPassRules = $passwordChecks['length'] && $passwordChecks['uppercase'] && $passwordChecks['special'] && $passwordChecks['digit'];
-
-		if (!$allPassRules) {
-				$formErrors['password'] = 'Password does not meet the required criteria.';
-		}
-
-		if (empty($formErrors)) {
-			$successMessage = 'Logged in successfully (demo).';
-			$username = '';
-				$password = '';
-				$passwordChecks = [
-						'length' => false,
-						'uppercase' => false,
-						'special' => false,
-						'digit' => false,
-				];
+		if ($username === '' || $password === '') {
+			$formErrors['login'] = 'Username and password are required.';
+		} else {
+			try {
+				$stmt = $pdo->prepare('SELECT id, username, password FROM users WHERE username = ? LIMIT 1');
+				$stmt->execute([$username]);
+				$userRow = $stmt->fetch();
+				if ($userRow && password_verify($password, $userRow['password'])) {
+					$_SESSION['user_id'] = $userRow['id'];
+					$_SESSION['username'] = $userRow['username'];
+					// audit login success
+					try {
+						$auditStmt = $pdo->prepare('INSERT INTO audit (user, action, datetime) VALUES (:user, :action, NOW())');
+						$auditStmt->execute([
+							':user' => $userRow['username'],
+							':action' => 'User logged in',
+						]);
+					} catch (Throwable $e) {
+						// ignore audit failures
+					}
+					header('Location: forms.php');
+					exit;
+				} else {
+					$formErrors['login'] = 'Invalid username or password.';
+				}
+			} catch (Throwable $e) {
+				$formErrors['login'] = 'Login failed.';
+			}
 		}
 }
 ?>
@@ -55,15 +76,19 @@ if ($method === 'POST') {
 		<div class="container py-5">
 			<div class="row justify-content-center">
 				<div class="col-12 col-md-8 col-lg-6">
-					<?php if (!empty($successMessage)): ?>
-						<div class="alert alert-success" role="alert">
-							<?php echo htmlspecialchars($successMessage); ?>
-						</div>
+					<?php if (isset($dbConnectError)): ?>
+						<div class="alert alert-danger" role="alert"><?php echo htmlspecialchars($dbConnectError); ?></div>
+					<?php endif; ?>
+					<?php if (isset($formErrors['login'])): ?>
+						<div class="alert alert-danger" role="alert"><?php echo htmlspecialchars($formErrors['login']); ?></div>
 					<?php endif; ?>
 
 					<div class="card shadow-sm">
 						<div class="card-header bg-white">
-							<h1 class="h4 mb-0">Login</h1>
+							<div class="d-flex justify-content-between align-items-center">
+								<h1 class="h4 mb-0">Login</h1>
+								<a href="register.php" class="btn btn-outline-secondary btn-sm">Create Account</a>
+							</div>
 						</div>
 						<div class="card-body">
 							<form method="post" novalidate>
@@ -95,16 +120,7 @@ if ($method === 'POST') {
 							
 								</div>
 
-								<ul class="list-unstyled small mb-3" aria-live="polite">
-									<li id="crit-length" class="criteria-item <?php echo $passwordChecks['length'] ? 'text-success' : 'text-danger'; ?>" aria-label="More than 8 characters"></li>
-									<li id="crit-uppercase" class="criteria-item <?php echo $passwordChecks['uppercase'] ? 'text-success' : 'text-danger'; ?>" aria-label="At least 1 uppercase letter"></li>
-									<li id="crit-special" class="criteria-item <?php echo $passwordChecks['special'] ? 'text-success' : 'text-danger'; ?>" aria-label="At least 1 special character (@, _, !)"></li>
-									<li id="crit-digit" class="criteria-item <?php echo $passwordChecks['digit'] ? 'text-success' : 'text-danger'; ?>" aria-label="At least 1 number"></li>
-								</ul>
-
-                                
-
-								<button id="submitBtn" type="submit" class="btn btn-primary w-100" disabled>Login</button>
+								<button id="submitBtn" type="submit" class="btn btn-primary w-100">Login</button>
 							</form>
 						</div>
 					</div>
@@ -118,47 +134,10 @@ if ($method === 'POST') {
 				const usernameEl = document.getElementById('username');
 				const submitBtn = document.getElementById('submitBtn');
 
-				const critEls = {
-					length: document.getElementById('crit-length'),
-					uppercase: document.getElementById('crit-uppercase'),
-					special: document.getElementById('crit-special'),
-					digit: document.getElementById('crit-digit'),
-				};
-
-				function checkPassword(pw) {
-					return {
-						length: pw.length > 8,
-						uppercase: /[A-Z]/.test(pw),
-						special: /[@_!]/.test(pw),
-						digit: /\d/.test(pw),
-					};
-				}
-
-				function updateCriteriaUI(checks) {
-					Object.keys(critEls).forEach(key => {
-						const el = critEls[key];
-						el.classList.toggle('text-success', !!checks[key]);
-						el.classList.toggle('text-danger', !checks[key]);
-					});
-				}
-
 				function updateValidity() {
-					const pw = passwordEl.value || '';
-					const checks = checkPassword(pw);
-					updateCriteriaUI(checks);
-					const allPass = checks.length && checks.uppercase && checks.special && checks.digit;
-
-					if (pw.length > 0) {
-						passwordEl.classList.toggle('is-valid', allPass);
-						passwordEl.classList.toggle('is-invalid', !allPass);
-					} else {
-						passwordEl.classList.remove('is-valid', 'is-invalid');
-					}
-
 					const usernameValid = usernameEl.checkValidity();
-                
-					const formOk = usernameValid && allPass;
-					submitBtn.disabled = !formOk;
+					const pwFilled = (passwordEl.value || '').length > 0;
+					submitBtn.disabled = !(usernameValid && pwFilled);
 				}
 
 				['input', 'blur', 'keyup', 'change'].forEach(evt => {
@@ -166,7 +145,6 @@ if ($method === 'POST') {
 					usernameEl.addEventListener(evt, updateValidity);
 				});
 
-                
 				updateValidity();
 			})();
 		</script>
